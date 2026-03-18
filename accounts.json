@@ -11,7 +11,7 @@
       "id": "account_1",
       "wallet": "your_address",
       "agent_id": null,
-      "private_key": "use_new_privatekey",
+      "private_key": "",
       "enabled": true,
       "max_vcus_override": null
     }
