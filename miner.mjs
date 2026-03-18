@@ -12,7 +12,7 @@ config();
 const fetch = (await import('node-fetch')).default;
 
 const LicenseConfig = {
-  APP_NAME: "peanut-miner",
+  APP_NAME: "peanut",
   CHECK_CODE_URL: "https://license-server-indol.vercel.app/api/check-code",
   LICENSE_FILE: path.resolve("./.license"),
   LOG_LEVEL: (process.env.LOG_LEVEL || "normal").toLowerCase(),
