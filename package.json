@@ -1,0 +1,18 @@
+{
+  "name": "peanut-miner",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "$PEANUT Mining Agent",
+  "main": "miner.mjs",
+  "scripts": {
+    "start": "node miner.mjs",
+    "dev": "node --watch miner.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "node-fetch": "^3.3.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
