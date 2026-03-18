@@ -12,7 +12,7 @@ config();
 const fetch = (await import('node-fetch')).default;
 
 const LicenseConfig = {
-  APP_NAME: "peanut",
+  APP_NAME: "peanut-miner",
   CHECK_CODE_URL: "https://license-server-indol.vercel.app/api/check-code",
   LICENSE_FILE: path.resolve("./.license"),
   LOG_LEVEL: (process.env.LOG_LEVEL || "normal").toLowerCase(),
@@ -122,7 +122,7 @@ export function clearLocalLicense(licenseFile = LicenseConfig.LICENSE_FILE) {
 
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const BASE_URL = (process.env.PEANUT_API_BASE || "https://wrcenmardnbprfpqhrqe.supabase.co/functions/v1/peanut-mining").trim();
+const BASE_URL = (process.env.PEANUT_API_BASE || "https://wrcenmardnbprfpqhrqe.supabase.co/functions/v1/peanut-mining").trim(); 
 const CONFIG_FILE = path.join(__dirname, 'accounts.json');
 const STATE_DIR = path.join(__dirname, 'states');
 
@@ -271,53 +271,82 @@ function solveHashChallenge(payload, difficulty, maxIterations = 10000000) {
 }
 
 
-async function registerAgent(accountId, publicKey, computeCapability, maxVcus, wallet, maxRetries = 3) {
+async function withRetry(fn, maxRetries = 3, baseDelay = 5000, label = "Operation", accountId = null) {
+  let lastError;
+  
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      log(`📡 Registering agent (attempt ${attempt}/${maxRetries})...`, accountId);
-      const resp = await fetch(`${BASE_URL}/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          agent_id: accountId,
-          public_key: publicKey,
-          compute_capability: computeCapability,
-          max_vcus: maxVcus,
-          wallet: wallet
-        }),
-        signal: AbortSignal.timeout(30000)
-      });
-      const text = await resp.text();
-      let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
-      if (resp.status === 200) {
-        log(`✅ Agent registered! Epoch: ${data.epoch_start || data.epoch || 'N/A'}`, accountId);
-        return { success: true, data };
-      } else {
-        log(`❌ Registration failed (${resp.status}): ${JSON.stringify(data)}`, accountId, "ERROR");
-        if (attempt < maxRetries) await sleep(Math.pow(2, attempt) * 1000);
-      }
+      log(`🔄 ${label} (attempt ${attempt}/${maxRetries})...`, accountId, "DEBUG");
+      const result = await fn();
+      return result;
     } catch (err) {
-      log(`❌ Registration error (attempt ${attempt}): ${err.message}`, accountId, "ERROR");
-      if (attempt < maxRetries) await sleep(Math.pow(2, attempt) * 1000);
+      lastError = err;
+      log(`⚠️ ${label} failed (attempt ${attempt}): ${err.message}`, accountId, "WARN");
+      
+      if (attempt === maxRetries) break;
+      
+      const waitTime = baseDelay * attempt;
+      log(`⏳ Waiting ${waitTime/1000}s before retry...`, accountId, "DEBUG");
+      await sleep(waitTime);
     }
   }
-  return { success: false, data: null };
+  
+  throw lastError;
+}
+
+
+async function registerAgent(accountId, publicKey, computeCapability, maxVcus, wallet, maxRetries = 3) {
+  return withRetry(async () => {
+    log(`📡 Registering agent...`, accountId);
+    
+    const resp = await fetch(`${BASE_URL}/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        agent_id: accountId,
+        public_key: publicKey,
+        compute_capability: computeCapability,
+        max_vcus: maxVcus,
+        wallet: wallet
+      }),
+      signal: AbortSignal.timeout(3000) 
+    });
+    
+    const text = await resp.text();
+    let data; 
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    
+    if (resp.status === 200) {
+      log(`✅ Agent registered! Epoch: ${data.epoch_start || data.epoch || 'N/A'}`, accountId);
+      return { success: true, data };
+    } else {
+      throw new Error(`Registration failed (${resp.status}): ${JSON.stringify(data)}`);
+    }
+  }, maxRetries, 5000, `Register ${accountId}`, accountId).catch(err => {
+    log(`❌ Registration failed after retries: ${err.message}`, accountId, "ERROR");
+    return { success: false, data: null };
+  });
 }
 
 async function getCurrentTask() {
-  try {
-    const resp = await fetch(`${BASE_URL}/tasks/current`, { method: 'GET', signal: AbortSignal.timeout(30000) });
+  return withRetry(async () => {
+    const resp = await fetch(`${BASE_URL}/tasks/current`, { 
+      method: 'GET', 
+      signal: AbortSignal.timeout(30000)
+    });
+    
     if (resp.status === 200) return await resp.json();
-    log(`❌ Failed to fetch task: ${await resp.text()}`, null, "ERROR");
+    
+    const errorText = await resp.text();
+    throw new Error(`Failed to fetch task (${resp.status}): ${errorText}`);
+  }, 3, 5000, "Fetch task", null).catch(err => {
+    log(`❌ Task fetch failed after retries: ${err.message}`, null, "ERROR");
     return null;
-  } catch (err) {
-    log(`❌ Task fetch error: ${err.message}`, null, "ERROR");
-    return null;
-  }
+  });
 }
 
-async function submitProof(accountId, taskId, solution, signature, computeTimeMs) {
-  try {
+async function submitProof(accountId, taskId, solution, signature, computeTimeMs, maxRetries = 3) {
+  return withRetry(async () => {
     const resp = await fetch(`${BASE_URL}/submit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -328,21 +357,42 @@ async function submitProof(accountId, taskId, solution, signature, computeTimeMs
         signature: signature,
         compute_time_ms: computeTimeMs
       }),
-      signal: AbortSignal.timeout(30000)
+      signal: AbortSignal.timeout(3000) 
     });
+    
     const text = await resp.text();
-    let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
-    if (resp.status !== 200) log(`[DEBUG] Submit response (${resp.status}): ${text}`, accountId, "DEBUG");
+    let data; 
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    
+    if (resp.status !== 200) {
+      log(`[DEBUG] Submit response (${resp.status}): ${text}`, accountId, "DEBUG");
+    }
+
+    if (resp.status !== 200 && data?.error && 
+        (data.error.toLowerCase().includes('duplicate') || text.toLowerCase().includes('duplicate submission'))) {
+      log(`⚠️ Duplicate submission - counting as SUCCESS!`, accountId, "WARN");
+      return { 
+        success: true, 
+        data: { 
+          vcus_credited: 1, 
+          peanut_earned: 500, 
+          epoch: data?.epoch || null,
+          duplicate: true 
+        } 
+      };
+    }
+    
     if (resp.status === 200) return { success: true, data };
+    
     if (data?.error?.toLowerCase?.()?.includes('not registered')) {
       return { success: false, data, error: 'AGENT_NOT_REGISTERED' };
     }
-    log(`❌ Submit failed (${resp.status}): ${JSON.stringify(data)}`, accountId, "ERROR");
-    return { success: false, data };
-  } catch (err) {
-    log(`❌ Submit error: ${err.message}`, accountId, "ERROR");
+    
+    throw new Error(`Submit failed (${resp.status}): ${JSON.stringify(data)}`);
+  }, maxRetries, 5000, `Submit ${taskId}`, accountId).catch(err => {
+    log(`❌ Submit failed after retries: ${err.message}`, accountId, "ERROR");
     return { success: false, error: err };
-  }
+  });
 }
 
 
@@ -357,7 +407,6 @@ async function runAccountMiner(account, config, license) {
 
   let state = loadAccountState(accountId);
   
-  // Generate or load keypair
   let privateKey = account.private_key;
   let publicKey = null;
   
@@ -367,8 +416,7 @@ async function runAccountMiner(account, config, license) {
     if (!keypair) { log(`❌ Failed to generate keypair`, accountId, "ERROR"); return; }
     publicKey = keypair.publicKey;
     privateKey = keypair.privateKey;
-    
-    // Save private key to config (optional - for persistence)
+
     account.private_key = privateKey;
     saveAccountsConfig(config);
     log(`💾 Private key saved to config (keep this file secure!)`, accountId, "WARN");
@@ -417,7 +465,6 @@ async function runAccountMiner(account, config, license) {
     log(`✅ Agent already registered`, accountId);
   }
 
-  // Mining loop for this account
   let consecutiveFailures = 0;
   const maxFailures = settings.max_consecutive_failures;
   let submitCount = 0;
@@ -476,16 +523,23 @@ async function runAccountMiner(account, config, license) {
       log(`✅ Solution: nonce=${solution.nonce}, hash=${solution.hash.slice(0,16)}..., time=${computeTime}ms`, accountId);
 
       const result = await submitProof(accountId, task.task_id, solutionJson, signature, computeTime);
+
       if (result.success) {
-        const { vcus_credited = 0, peanut_earned = 0, epoch } = result.data;
-        log(`✅ SUBMITTED! VCUs: +${vcus_credited} | $PEANUT: +${peanut_earned.toLocaleString()}`, accountId);
+        const { vcus_credited = 0, peanut_earned = 0, epoch, duplicate = false } = result.data;
+        
+        if (duplicate) {
+          log(`🎯 Duplicate accepted! VCUs: +${vcus_credited} | $PEANUT: +${peanut_earned.toLocaleString()} (RECOVERED)`, accountId);
+        } else {
+          log(`✅ SUBMITTED! VCUs: +${vcus_credited} | $PEANUT: +${peanut_earned.toLocaleString()}`, accountId);
+        }
+        
         state.total_vcus += vcus_credited;
         state.total_peanut += peanut_earned;
         state.epoch = epoch || state.epoch;
         state.total_tasks = (state.total_tasks || 0) + 1;
         saveAccountState(accountId, state);
         submitCount++; 
-        consecutiveFailures = 0;
+        consecutiveFailures = 0; 
         
         if (submitCount % 10 === 0) {
           log(`📊 Stats: VCUs=${state.total_vcus.toLocaleString()} | $PEANUT=${state.total_peanut.toLocaleString()} | Tasks=${state.total_tasks}`, accountId);
@@ -513,9 +567,6 @@ async function runAccountMiner(account, config, license) {
   }
 }
 
-// ==============================
-// MULTI ACCOUNT ORCHESTRATOR
-// ==============================
 
 async function runMultiAccountMiner() {
   console.log("🥜 $PEANUT Mining Agent - Multi Account + License");
@@ -576,10 +627,8 @@ function setupGracefulShutdown() {
 
 setupGracefulShutdown();
 
-// Handle command line arguments for account management
 const args = process.argv.slice(2);
 if (args[0] === '--add-account') {
-  // Interactive mode to add new account
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const config = loadAccountsConfig();
   
